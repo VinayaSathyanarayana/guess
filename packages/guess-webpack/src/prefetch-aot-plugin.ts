@@ -1,12 +1,12 @@
-import { readFileSync } from 'fs';
+import { readFileSync, writeFile } from 'fs';
 import {
   PrefetchAotGraph,
   PrefetchAotNeighbor,
-  PrefetchAotPluginConfig
+  PrefetchAotPluginConfig,
+  FileChunkMap
 } from './declarations';
 
 import { join } from 'path';
-import { table } from 'table';
 import chalk from 'chalk';
 import {
   buildMap,
@@ -15,12 +15,13 @@ import {
   stripExtension
 } from './utils';
 import { Logger, LogLevel } from '../../common/logger';
+import { AssetObserver, Asset } from './asset-observer';
 
 const template = require('lodash.template');
-const ConcatSource = require('webpack-sources').ConcatSource;
+const { table } = require('table');
 
 const alterChunk = (
-  compilation: any,
+  compiler: any,
   chunkName: string,
   original: string,
   toAlter: string,
@@ -40,7 +41,7 @@ const alterChunk = (
           'utf-8'
         );
 
-        const compiler = require('webpack')({
+        const inMemoryCompiler = require('webpack')({
           context: '/src/',
           mode: 'production',
           entry: './index.js',
@@ -50,44 +51,38 @@ const alterChunk = (
           }
         });
 
-        compiler.inputFileSystem = memoryFs;
-        compiler.outputFileSystem = memoryFs;
-        compiler.resolvers.normal.fileSystem = memoryFs;
-        compiler.resolvers.context.fileSystem = memoryFs;
+        inMemoryCompiler.inputFileSystem = memoryFs;
+        inMemoryCompiler.outputFileSystem = memoryFs;
+        inMemoryCompiler.resolvers.normal.fileSystem = memoryFs;
+        inMemoryCompiler.resolvers.context.fileSystem = memoryFs;
 
-        compiler.run((err: any, stats: any) => {
+        inMemoryCompiler.run((err: any, stats: any) => {
           if (err) {
             reject();
             throw err;
           }
-          resolve(stats.compilation.assets['./output.js'] as string);
+          resolve(stats.compilation.assets['./output.js'].source() as string);
         });
       });
 
   return promise.then((output: string) => {
-    compilation.assets[chunkName] = new ConcatSource(original, '\n', output);
-    return output;
+    return new Promise((resolve, reject) => {
+      writeFile(
+        join(compiler.outputPath, chunkName),
+        original + '\n' + output,
+        err => {
+          if (err) {
+            reject(err);
+          }
+          resolve();
+        }
+      );
+    });
   });
 };
 
-const forEachBlock = (chunk: any, cb: ({ block, chunk }: any) => void) => {
-  let blocks: any[] = [];
-  if (chunk.groupsIterable) {
-    blocks = Array.from(chunk.groupsIterable).reduce(
-      (prev: any[], group: any) =>
-        prev.concat(
-          group.getBlocks().map((block: any) => ({ chunk: group, block }))
-        ),
-      []
-    );
-  } else {
-    blocks = (chunk.blocks || []).map((block: any) => ({ chunk, block }));
-  }
-  blocks.forEach(cb);
-};
-
 export class PrefetchAotPlugin {
-  logger = new Logger();
+  private logger = new Logger();
   constructor(private _config: PrefetchAotPluginConfig) {
     if (!_config.data) {
       throw new Error('Page graph not provided');
@@ -97,23 +92,29 @@ export class PrefetchAotPlugin {
     }
   }
 
-  execute(compilation: any, callback: any) {
+  execute(
+    compiler: any,
+    compilation: any,
+    assetObserver: AssetObserver,
+    callback: any
+  ) {
     this.logger.debug('Inside PrefetchAotPlugin');
 
     let mainName: string | null = null;
-    let fileChunk: { [key: string]: string } = {};
+    let fileChunk: FileChunkMap = {};
 
     try {
       const res = getCompilationMapping(
         compilation,
         new Set(this._config.routes.map(r => stripExtension(r.modulePath))),
-        this._config.debug
+        this.logger
       );
       mainName = res.mainName;
       fileChunk = res.fileChunk;
     } catch (e) {
       callback();
       this.logger.error(e);
+      return;
     }
 
     this.logger.debug(
@@ -127,7 +128,7 @@ export class PrefetchAotPlugin {
     }
 
     const newConfig: PrefetchAotGraph = {};
-    const routeChunk: { [route: string]: string } = {};
+    const chunkRoute: { [chunk: string]: string } = {};
     const initialGraph = buildMap(
       this._config.routes.map(r => {
         return {
@@ -139,6 +140,7 @@ export class PrefetchAotPlugin {
         };
       }),
       this._config.data,
+      this.logger,
       !!this._config.debug
     );
 
@@ -150,10 +152,15 @@ export class PrefetchAotPlugin {
     Object.keys(initialGraph).forEach(route => {
       newConfig[route] = [];
       initialGraph[route].forEach(neighbor => {
-        routeChunk[neighbor.route] = fileChunk[neighbor.file];
+        const node = fileChunk[neighbor.file];
+        if (!node) {
+          this.logger.debug('No chunk for file', neighbor.file);
+          return;
+        }
+        chunkRoute[node.file] = neighbor.route;
         const newTransition: PrefetchAotNeighbor = {
           probability: neighbor.probability,
-          chunk: fileChunk[neighbor.file]
+          chunks: [...new Set([node.file, ...node.deps])]
         };
         newConfig[route].push(newTransition);
       });
@@ -165,64 +172,58 @@ export class PrefetchAotPlugin {
       JSON.stringify(fileChunk, null, 2)
     );
     this.logger.debug(
-      'Route to chunk mapping is',
-      JSON.stringify(routeChunk, null, 2)
+      'Chunk to route mapping is',
+      JSON.stringify(chunkRoute, null, 2)
     );
 
-    this.logger.debug('Adding prefetching logic in', mainName);
-
-    const old = compilation.assets[mainName];
-
-    const codeTemplate = 'aot.tpl';
-    const runtimeTemplate = readFileSync(
-      join(__dirname, codeTemplate)
-    ).toString();
-
-    const runtimeLogic = template(runtimeTemplate)({
-      THRESHOLDS: JSON.stringify(
-        Object.assign({}, defaultPrefetchConfig, this._config.prefetchConfig)
-      )
-    });
-
-    this.logger.debug('Altering the main chunk');
-
-    const compilationPromises = [
-      alterChunk(compilation, mainName, old.source(), runtimeLogic, true)
-    ];
-
-    this.logger.debug('Main chunk altered');
-    this.logger.debug('Altering all other chunks to prefetch their neighbours');
-
-    routeChunk['/'] = mainName;
+    chunkRoute[mainName] = '/';
 
     const tableOutput: any[] = [['Prefetcher', 'Target', 'Probability']];
     const generateNeighbors = (
       route: string,
       currentChunk: string,
       c: PrefetchAotNeighbor
-    ) => {
-      if (!c.chunk) {
-        this.logger.warn('Cannot find chunk name for', c, 'from route', route);
-
+    ): false | [number, string] => {
+      if (!c.chunks || !c.chunks.length) {
+        this.logger.debug('Cannot find chunk name for', c, 'from route', route);
         return false;
       }
-      tableOutput.push([currentChunk, c.chunk, c.probability]);
-      return `['${join(this._config.basePath, c.chunk)}',${c.probability}]`;
+      tableOutput.push([currentChunk, c.chunks[0], c.probability]);
+      return [
+        c.probability,
+        `[${parseFloat(c.probability.toFixed(2))},${c.chunks
+          .map(chunk => `'${chunk}'`)
+          .join(',')}]`
+      ];
     };
 
-    Object.keys(routeChunk).forEach(route => {
-      const chunkName = routeChunk[route];
-      const currentChunk = compilation.assets[chunkName];
-      if (!currentChunk) {
-        callback();
-        this.logger.warn(
-          `Cannot find the chunk "${chunkName}" for route "${route}"`
+    let chunksLeft = Object.keys(chunkRoute).length;
+
+    const conf = this._config.prefetchConfig || defaultPrefetchConfig;
+    const minProbability = Math.min(
+      conf['2g'],
+      conf['3g'],
+      conf['4g'],
+      conf['slow-2g']
+    );
+
+    const handleAsset = (asset: Asset) => {
+      const chunkName = asset.name;
+      const route = chunkRoute[chunkName];
+      if (!route) {
+        this.logger.debug(
+          `Cannot find the route "${route}" for chunk "${chunkName}"`
         );
+        asset.callback();
         return;
       }
+
       const neighbors = (newConfig[route] || [])
         .map(generateNeighbors.bind(null, route, chunkName))
-        .filter(Boolean);
+        .filter(Boolean)
+        .sort((a, b) => (a === false || b === false ? 0 : b[0] - a[0]))
+        .filter(n => n === false ? false : n[0] >= minProbability)
+        .map(n => (n === false ? null : n[1]));
 
       if (newConfig[route]) {
         this.logger.debug('Adding', neighbors);
@@ -230,51 +231,55 @@ export class PrefetchAotPlugin {
         this.logger.debug('Nothing to prefetch from', route);
       }
 
-      const newCode = newConfig[route]
+      let newCode = newConfig[route]
         ? `__GUESS__.p(${neighbors.join(',')})`
         : '';
 
-      // If this is the main chunk, we want to add prefetching instructions
-      // only after the runtime is in the bundle, we don't want to overwrite it.
-      if (chunkName === mainName) {
-        compilationPromises[0] = compilationPromises[0].then(() =>
-          alterChunk(
-            compilation,
-            chunkName,
-            compilation.assets[chunkName].source(),
-            newCode,
-            false
-          )
-        );
-      } else {
-        compilationPromises.push(
-          alterChunk(
-            compilation,
-            chunkName,
-            currentChunk.source(),
-            newCode,
-            false
-          )
-        );
+      const isMainChunk = mainName === chunkName;
+
+      if (isMainChunk) {
+        this.logger.debug('Adding prefetching logic in', mainName);
+        const codeTemplate = 'aot.tpl';
+        const runtimeTemplate = readFileSync(
+          join(__dirname, codeTemplate)
+        ).toString();
+
+        const prefetchingLogic = template(runtimeTemplate)({
+          THRESHOLDS: JSON.stringify(
+            Object.assign(
+              {},
+              defaultPrefetchConfig,
+              this._config.prefetchConfig
+            )
+          ),
+          BASE_PATH: this._config.base
+        });
+        newCode = prefetchingLogic + ';' + newCode;
+        this.logger.debug('Altering the main chunk');
       }
-    });
 
-    this.logger.info(
-      chalk.blue(
-        '\n\n\n🔮 Guess.js introduced the following prefetching instructions:'
-      )
-    );
-    this.logger.info(table(tableOutput));
+      alterChunk(
+        compiler,
+        chunkName,
+        readFileSync(join(compiler.outputPath, chunkName)).toString(),
+        newCode,
+        isMainChunk
+      ).finally(asset.callback);
 
-    Promise.all(compilationPromises)
-      .then(() => {
-        this.logger.debug('Chunks altered');
-        callback();
-      })
-      .catch(e => {
-        this.logger.error(e);
-        callback();
-        throw e;
-      });
+      chunksLeft -= 1;
+      if (!chunksLeft) {
+        this.logger.info(
+          chalk.blue(
+            '\n\n\n🔮 Guess.js introduced the following prefetching instructions:'
+          )
+        );
+        this.logger.info('\n\n' + table(tableOutput));
+      }
+    };
+
+    assetObserver.onAsset(handleAsset);
+    assetObserver.buffer.forEach(handleAsset);
+
+    callback();
   }
 }

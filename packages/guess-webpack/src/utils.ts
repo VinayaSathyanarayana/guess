@@ -1,6 +1,7 @@
-import { PrefetchConfig, BundleEntryGraph } from './declarations';
+import { PrefetchConfig, BundleEntryGraph, FileChunkMap } from './declarations';
 import { Graph, RoutingModule } from '../../common/interfaces';
 import { join } from 'path';
+import { Logger } from '../../common/logger';
 
 export const defaultPrefetchConfig: PrefetchConfig = {
   '4g': 0.15,
@@ -12,6 +13,7 @@ export const defaultPrefetchConfig: PrefetchConfig = {
 const validateInput = (
   routes: RoutingModule[],
   graph: Graph,
+  logger: Logger,
   debug: boolean
 ) => {
   const routesInReport = new Set();
@@ -24,7 +26,7 @@ const validateInput = (
     .filter(x => !routesInReport.has(x))
     .forEach(r => {
       if (debug) {
-        console.warn(
+        logger.debug(
           `The route ${r} is not present in the report or in the route declarations`
         );
       }
@@ -34,9 +36,10 @@ const validateInput = (
 export const buildMap = (
   routes: RoutingModule[],
   graph: Graph,
+  logger: Logger,
   debug: boolean
 ): BundleEntryGraph => {
-  validateInput(routes, graph, debug);
+  validateInput(routes, graph, logger, debug);
   const result: BundleEntryGraph = {};
   const routeFile = {} as { [key: string]: string };
   routes.forEach(r => {
@@ -73,8 +76,10 @@ export interface JSReason {
 }
 
 export interface JSModule {
+  id: string;
   name: string;
   reasons: JSReason[];
+  chunks: number[];
 }
 
 export interface JSOrigin {
@@ -84,6 +89,7 @@ export interface JSOrigin {
 }
 
 export interface JSChunk {
+  id: number;
   files: string[];
   initial: boolean;
   modules: JSModule[];
@@ -92,16 +98,64 @@ export interface JSChunk {
 
 export interface JSCompilation {
   chunks: JSChunk[];
+  modules: JSModule[];
 }
+
+interface ChunkGraph {
+  [chunk: string]: Set<string>;
+}
+
+const getChunkJsFile = (chunk: JSChunk) => {
+  return chunk.files.filter(f => f.endsWith('.js')).shift();
+};
+
+const getChunkDependencyGraph = (stats: JSCompilation): ChunkGraph => {
+  const chunkGraph: ChunkGraph = {};
+
+  const chunkIdToChunk: {[id: number]: JSChunk} = {};
+  stats.chunks.forEach(chunk => chunkIdToChunk[chunk.id] = chunk);
+
+  const moduleIdToModule: {[id: string]: JSModule} = {};
+  stats.modules.forEach(module => moduleIdToModule[module.id] = module);
+
+  stats.modules.forEach(module => {
+    const moduleChunks = module.chunks.map(id => chunkIdToChunk[id]);
+    module.reasons.forEach(reason => {
+      const dependent = moduleIdToModule[reason.moduleId];
+      if (!dependent) {
+        return;
+      }
+      const dependentChunks = dependent.chunks.map(id => chunkIdToChunk[id]);
+      dependentChunks.forEach(dependentChunk => {
+        const file = getChunkJsFile(dependentChunk);
+        if (!file) {
+          return;
+        }
+        chunkGraph[file] = chunkGraph[file] || new Set<string>();
+        moduleChunks.forEach(dependencyChunk => {
+          if (dependencyChunk.initial) {
+            return;
+          }
+          const dependencyFile = getChunkJsFile(dependencyChunk);
+          if (!dependencyFile) {
+            return;
+          }
+          chunkGraph[file].add(dependencyFile);
+        });
+      });
+    });
+  });
+  return chunkGraph;
+};
 
 export const getCompilationMapping = (
   compilation: Compilation,
   entryPoints: Set<string>,
-  debug?: boolean
-): { mainName: string | null; fileChunk: { [path: string]: string } } => {
-  const fileChunk: { [path: string]: string } = {};
+  logger: Logger,
+): { mainName: string | null; fileChunk: FileChunkMap } => {
 
   let mainName: string | null = null;
+  let mainPriority = Infinity;
   function getModulePath(moduleName: string): string | null {
     const cwd = process.cwd();
     const relativePath = moduleName
@@ -117,15 +171,40 @@ export const getCompilationMapping = (
     return join(cwd, jsPath);
   }
 
-  compilation
-    .getStats()
-    .toJson()
+  const jsonStats = compilation.getStats().toJson();
+
+  const chunkDepGraph = getChunkDependencyGraph(jsonStats);
+  logger.debug('Chunk dependency graph', chunkDepGraph);
+
+  const fileChunk: FileChunkMap = {};
+
+  jsonStats
     .chunks.forEach(c => {
-      if (!c.files[0].endsWith('.js')) {
+      const jsFile = getChunkJsFile(c);
+      if (!jsFile) {
         return;
       }
       if (c.initial) {
-        mainName = c.files.filter(f => f.endsWith('.js')).pop()!;
+        const pickers = [
+          (f: string) => f.startsWith('main') && f.endsWith('.js'),
+          (f: string) => f.indexOf('/main') >= 0 && f.endsWith('.js'),
+          (f: string) => f.startsWith('runtime') && f.endsWith('.js'),
+          (f: string) => f.indexOf('/runtime') >= 0 && f.endsWith('.js'),
+          (f: string) => f.startsWith('vendor') && f.endsWith('.js'),
+          (f: string) => f.indexOf('/vendor') >= 0 && f.endsWith('.js'),
+          (f: string) => f.startsWith('common') && f.endsWith('.js'),
+          (f: string) => f.endsWith('.js'),
+        ]
+        let currentMain = null;
+        let currentPriority = 0;
+        while (!currentMain && pickers.length) {
+          currentMain = c.files.filter(pickers.shift()!).pop()!;
+          currentPriority++;
+        }
+        if (mainPriority > currentPriority) {
+          mainName = currentMain;
+          mainPriority = currentPriority;
+        }
       }
       if (c.modules && c.modules.length) {
         const existingEntries = c.modules.filter(m => {
@@ -136,26 +215,20 @@ export const getCompilationMapping = (
           return entryPoints.has(path);
         });
         if (existingEntries.length > 1) {
-          if (debug) {
-            console.warn(
-              'There are more than two entry points associated with chunk',
-              c.files[0]
-            );
-          }
+          logger.debug(
+            'There are more than two entry points associated with chunk',
+            jsFile
+          );
         } else if (existingEntries.length === 0) {
-          if (debug) {
-            console.error('Cannot find entry point for chunk: ' + c.files[0]);
-          }
+          logger.debug('Cannot find entry point for chunk: ' + jsFile);
         } else {
           const path = getModulePath(existingEntries[0].name);
           if (path) {
-            fileChunk[path] = c.files[0];
+            fileChunk[path] = fileChunk[path] || { file: jsFile, deps: chunkDepGraph[jsFile] };
           }
         }
       } else {
-        if (debug) {
-          console.warn('Cannot find modules for chunk', c.files[0]);
-        }
+        logger.debug('Cannot find modules for chunk', jsFile);
       }
     });
 

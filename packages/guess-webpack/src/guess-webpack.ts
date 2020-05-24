@@ -1,16 +1,13 @@
 import { RouteProvider, PrefetchConfig } from './declarations';
 import { PrefetchPlugin } from './prefetch-plugin';
 import { PrefetchAotPlugin } from './prefetch-aot-plugin';
-import {
-  Graph,
-  RoutingModule,
-  Period,
-} from '../../common/interfaces';
+import { Graph, RoutingModule, Period } from '../../common/interfaces';
 import { getReport } from './ga-provider';
+import { AssetObserver } from './asset-observer';
 
 export interface RuntimeConfig {
   /** @internal */
-  basePath?: string;
+  base?: string;
   /** @internal */
   prefetchConfig?: PrefetchConfig;
   /** @internal */
@@ -60,19 +57,39 @@ export class GuessPlugin {
   }
 
   apply(compiler: any) {
-    compiler.hooks.emit.tapAsync({
-      stage: 0,
-      name: 'GuessPlugin'
-    }, (compilation: any, cb: any) =>
-      this._execute(compilation, cb)
+    const assetObserver = new AssetObserver();
+    if (!this._config.runtime || !this._config.runtime.delegate) {
+      compiler.hooks.assetEmitted.tapAsync(
+        'GuessPlugin',
+        (file: string, _: any, callback: any) =>
+          assetObserver.addAsset({
+            name: file,
+            callback
+          })
+      );
+    }
+
+    compiler.hooks.emit.tapAsync(
+      {
+        stage: 0,
+        name: 'GuessPlugin'
+      },
+      (compilation: any, cb: any) => this._execute(compiler, compilation, assetObserver, cb)
     );
   }
 
-  private _execute(compilation: any, cb: any) {
+  private _execute(compiler: any, compilation: any, assetObserver: AssetObserver, cb: any) {
     extractRoutes(this._config).then(async routes => {
       try {
         const data = await this._getReport(routes);
-        return this._executePrefetchPlugin(data, routes, compilation, cb);
+        return this._executePrefetchPlugin(
+          data,
+          routes,
+          compiler,
+          compilation,
+          assetObserver,
+          cb
+        );
       } catch (err) {
         console.error(err);
         cb();
@@ -98,7 +115,9 @@ export class GuessPlugin {
   private _executePrefetchPlugin(
     data: Graph,
     routes: RoutingModule[],
+    compiler: any,
     compilation: any,
+    assetObserver: AssetObserver,
     cb: any
   ) {
     const { runtime } = this._config;
@@ -107,9 +126,9 @@ export class GuessPlugin {
         data,
         debug: this._config.debug,
         basePath: runtime
-          ? runtime.basePath === undefined
+          ? runtime.base === undefined
             ? ''
-            : runtime.basePath
+            : runtime.base
           : '',
         prefetchConfig: runtime ? runtime.prefetchConfig : undefined,
         routes,
@@ -119,14 +138,14 @@ export class GuessPlugin {
       new PrefetchAotPlugin({
         data,
         debug: this._config.debug,
-        basePath: runtime
-          ? runtime.basePath === undefined
+        base: runtime
+          ? runtime.base === undefined
             ? ''
-            : runtime.basePath
+            : runtime.base
           : '',
         prefetchConfig: runtime ? runtime.prefetchConfig : undefined,
-        routes,
-      }).execute(compilation, cb);
+        routes
+      }).execute(compiler, compilation, assetObserver, cb);
     }
   }
 }

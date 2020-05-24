@@ -4,7 +4,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "generate-predictions-tests": "NODE_ENV=test mocha ./test/gaclientTests.js",
+    "generate-predictions-tests": "NODE_ENV=test mocha ./test/gaClientTests.js",
     "client-tests": "NODE_ENV=test mocha ./test/clientTests.js",
     "server-tests": "NODE_ENV=test mocha ./test/serverTests.js",
     "build": "babel src/client.js --out-file dist/client.js --presets minify"
@@ -16,21 +16,21 @@
     "dotenv": "^8.0.0",
     "express": "^4.16.3",
     "fs": "0.0.2",
-    "googleapis": "^41.0.0",
+    "googleapis": "^49.0.0",
     "mongoose": "^5.0.14"
   },
   "devDependencies": {
     "babel-cli": "6.26.0",
-    "babel-minify": "0.5.0",
+    "babel-minify": "0.5.1",
     "babel-preset-es2015": "6.24.1",
-    "babel-preset-minify": "0.5.0",
+    "babel-preset-minify": "0.5.1",
     "chai": "4.2.0",
     "cors": "2.8.5",
-    "http-server": "0.11.1",
-    "mocha": "6.2.0",
+    "http-server": "0.12.1",
+    "mocha": "7.1.1",
     "path": "0.12.7",
-    "puppeteer": "1.19.0",
-    "standard": "13.1.0",
+    "puppeteer": "3.0.0",
+    "standard": "14.3.3",
     "supertest": "4.0.2"
   }
 }

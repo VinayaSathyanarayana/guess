@@ -2,7 +2,8 @@ import { readFileSync } from 'fs';
 import {
   PrefetchPluginConfig,
   PrefetchGraph,
-  PrefetchNeighbor
+  PrefetchNeighbor,
+  FileChunkMap
 } from './declarations';
 import { compressGraph } from './compress';
 import { join } from 'path';
@@ -12,11 +13,14 @@ import {
   getCompilationMapping,
   stripExtension
 } from './utils';
+import { Logger } from '../../common/logger';
 
 const template = require('lodash.template');
 const ConcatSource = require('webpack-sources').ConcatSource;
 
 export class PrefetchPlugin {
+  private logger = new Logger();
+
   constructor(private _config: PrefetchPluginConfig) {
     if (!_config.data) {
       throw new Error('Page graph not provided');
@@ -25,13 +29,13 @@ export class PrefetchPlugin {
 
   execute(compilation: any, callback: any) {
     let mainName: string | null = null;
-    let fileChunk: { [key: string]: string } = {};
+    let fileChunk: FileChunkMap = {};
 
     try {
       const res = getCompilationMapping(
         compilation,
         new Set(this._config.routes.map(r => stripExtension(r.modulePath))),
-        this._config.debug
+        this.logger,
       );
       mainName = res.mainName;
       fileChunk = res.fileChunk;
@@ -55,15 +59,19 @@ export class PrefetchPlugin {
         };
       }),
       this._config.data,
+      this.logger,
       !!this._config.debug
     );
     Object.keys(initialGraph).forEach(c => {
       newConfig[c] = [];
       initialGraph[c].forEach(p => {
+        const node = fileChunk[p.file];
         const newTransition: PrefetchNeighbor = {
           probability: p.probability,
           route: p.route,
-          chunk: fileChunk[p.file]
+          // In delegate mode we don't care about chunks
+          // so it's fine if the mapping file/chunk is missing.
+          chunk: (node || { file: '' }).file
         };
         newConfig[c].push(newTransition);
       });

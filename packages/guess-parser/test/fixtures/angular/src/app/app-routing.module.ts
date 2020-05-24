@@ -33,8 +33,25 @@ const routes: Routes = [
     loadChildren: 'app/qux/qux.module#QuxModule'
   },
   {
+    path: 'library',
+    loadChildren: 'app/wrapper/wrapper.module#WrapperModule'
+  },
+  {
     path: 'bar-simple',
     component: BarSimpleComponent
+  },
+  {
+    path: 'about',
+    loadChildren: () => import('./about/about.module').then(m => m.AboutModule)
+  },
+  {
+    path: 'eager',
+    children: [
+      {
+        path: 'lazy',
+        loadChildren: () => import('./lazy/lazy.module').then(m => m.LazyModule)
+      }
+    ]
   },
   {
     path: '',

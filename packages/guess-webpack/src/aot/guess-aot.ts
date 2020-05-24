@@ -35,7 +35,9 @@ const supportedPrefetchStrategy = support('prefetch')
 const preFetched: { [key: string]: boolean } = {};
 
 const prefetch = (basePath: string, url: string) => {
-  url = basePath + url;
+  if (basePath) {
+    url = basePath + '/' + url;
+  }
   if (preFetched[url]) {
     return;
   }
@@ -50,13 +52,21 @@ const getConnection = (global: any): ConnectionEffectiveType => {
   return global.navigator.connection.effectiveType || '3g';
 };
 
-export const initialize = (
-  g: any,
-  t: PrefetchConfig,
-) => {
+export const initialize = (g: any, t: PrefetchConfig, base?: string) => {
   const idle = g.requestIdleCallback || ((cb: Function) => setTimeout(cb, 0));
+  base = base || '';
   g.__GUESS__ = {};
-  g.__GUESS__.p = (...p: [string, number][]) => {
-    idle(() => p.forEach(c => c[1] >= t[getConnection(g)] ? prefetch('', c[0]) : void 0))
+  g.__GUESS__.p = (...p: [number, string][]) => {
+    idle(() => {
+      const speed = getConnection(g);
+      for (let i = 0; i < p.length; i++) {
+        const c = p[i];
+        if (c[0] >= t[speed]) {
+          for (let j = 1; j < c.length; j++) {
+            prefetch(base as string, c[j] as string);
+          }
+        }
+      }
+    });
   };
 };

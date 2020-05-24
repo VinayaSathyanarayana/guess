@@ -66,7 +66,11 @@ export interface PrefetchGraph {
 
 export interface PrefetchAotNeighbor {
   probability: number;
-  chunk: string;
+  chunks: string[];
+}
+
+export interface FileChunkMap {
+  [path: string]: { file: string, deps: Set<string> } | null
 }
 
 export interface PrefetchAotGraph {
@@ -76,7 +80,7 @@ export interface PrefetchAotGraph {
 export interface PrefetchAotPluginConfig {
   debug?: boolean;
   data: Graph;
-  basePath: string;
+  base: string;
   prefetchConfig?: PrefetchConfig;
   routes: RoutingModule[];
 }

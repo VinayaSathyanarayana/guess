@@ -1,6 +1,6 @@
 {
   "name": "guess-ga",
-  "version": "0.3.9",
+  "version": "0.4.18",
   "description": "Fetch structured data from Google Analytics",
   "main": "dist/guess-ga/index.js",
   "types": "dist/guess-ga/index.d.ts",
@@ -25,7 +25,11 @@
   },
   "homepage": "https://github.com/guess-js/guess#readme",
   "dependencies": {
-    "googleapis": "^41.0.0"
+    "googleapis": "^49.0.0"
+  },
+  "devDependencies": {
+    "ts-loader": "7.0.0",
+    "typescript": "3.8.3"
   },
   "files": [
     "dist"
@@ -43,10 +47,6 @@
       "json",
       "node"
     ]
-  },
-  "devDependencies": {
-    "ts-loader": "6.0.4",
-    "typescript": "3.5.3"
   },
   "scripts": {
     "build": "webpack"

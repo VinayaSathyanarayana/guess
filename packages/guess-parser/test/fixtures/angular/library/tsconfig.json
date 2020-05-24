@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../out-tsc/library",
+    "module": "es2015",
+    "types": []
+  },
+  "include": ["**/*.ts"]
+}
